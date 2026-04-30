@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Skull, Fingerprint, ShieldAlert, AlertTriangle, Trophy, Loader, ChevronRight, ArrowLeft, RefreshCw } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api/puzzles';
@@ -19,6 +19,20 @@ const shuffleArray = (array) => {
   return newArr;
 };
 
+const speak = (input) => {
+  if (!window.speechSynthesis) return;
+
+  const text = typeof input === 'string' ? input : input?.text;
+  if (!text) return;
+
+  window.speechSynthesis.cancel();
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 0.9;
+
+  window.speechSynthesis.speak(utterance);
+};
+
 export default function App() {
   const [gameState, setGameState] = useState('menu');
   const [puzzle, setPuzzle] = useState(null);
@@ -28,18 +42,54 @@ export default function App() {
   const [activeSuspect, setActiveSuspect] = useState(null);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [attempts, setAttempts] = useState(2);
+  const [showSolution, setShowSolution] = useState(false);
+  const [countdown, setCountdown] = useState(5);
+  const failAudioRef = useRef(null);
+  const winAudioRef = useRef(null);
+  const [isFailing, setIsFailing] = useState(false);
 
-  // 1. IMPROVED DATA PARSER: Forces all items to be strings immediately
-  const processItems = (categoryName, categories) => {
-    const category = categories.find(c => c.name.toLowerCase().includes(categoryName.toLowerCase()));
-    if (!category || !category.items) return [];
-    
-    return category.items.map(item => {
-      if (typeof item === 'string') return item;
-      // Handle { name: "...", occupation: "..." } or similar
-      return item.name || item.Name || item.title || "Unknown Item";
-    });
-  };
+const speakAllClues = async () => {
+  if (!window.speechSynthesis || !puzzle?.clues) return;
+
+  window.speechSynthesis.cancel();
+
+  for (const clue of puzzle.clues) {
+    await speakAsync(clue.text);
+  }
+};
+
+const speakAsync = (text) => {
+  return new Promise((resolve) => {
+    const utterance = new SpeechSynthesisUtterance(text);
+
+    utterance.rate = 0.9;
+
+    utterance.onend = resolve;
+    utterance.onerror = resolve;
+
+    window.speechSynthesis.speak(utterance);
+  });
+};
+
+const speakSolution = async () => {
+  if (!window.speechSynthesis || !puzzle?.solution) return;
+
+  const { Suspects, Weapons, Justification } = puzzle.solution;
+
+  const parts = [
+    `You failed, Jency.`,
+    `The killer was ${Suspects.join(', ')}`,
+    `The weapon used was ${Weapons.join(', ')}`,
+    `Here is why. ${Justification}`
+  ];
+
+  window.speechSynthesis.cancel();
+
+  for (const text of parts) {
+    await speakAsync(text);
+  }
+};
 
   const startInvestigation = async (diff) => {
     setLoading(true);
@@ -57,8 +107,8 @@ export default function App() {
       if (!data || !data.categories) throw new Error('Forensic file is unreadable.');
 
       // 2. STRIP OBJECTS: Convert items to strings before they ever hit the state
-      const suspects = processItems('suspect', data.categories);
-      const weapons = processItems('weapon', data.categories);
+      const suspects = data.categories.find(c => c.name === 'Suspects')?.items || [];
+      const weapons = data.categories.find(c => c.name === 'Weapons')?.items || [];
 
       setPuzzle(data);
       setShuffledSuspects(shuffleArray(suspects));
@@ -85,29 +135,74 @@ export default function App() {
   };
 
   const submitVerdict = async () => {
-    setLoading(true);
-    try {
-      const solution = {
-        Suspects: Object.keys(selections),
-        Weapons: Object.values(selections)
-      };
-      const response = await fetch(`${API_BASE_URL}/${puzzle.id}/validate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ solution }),
-      });
-      const data = await response.json();
-      if (data.isCorrect) {
-        setGameState('won');
+  if (attempts <= 0) return;
+
+  setLoading(true);
+
+  try {
+    const solution = {
+      Suspects: Object.keys(selections),
+      Weapons: Object.values(selections)
+    };
+
+    const res = await fetch(`${API_BASE_URL}/${puzzle.id}/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ solution }),
+    });
+
+    const data = await res.json();
+
+    if (data.isCorrect) {
+    // stop fail sound if somehow playing
+    failAudioRef.current?.pause();
+    failAudioRef.current.currentTime = 0;
+
+    // play win sound
+    winAudioRef.current?.play().catch(() => {});
+
+    setGameState('won');
+  } else {
+      const remaining = attempts - 1;
+      setAttempts(remaining);
+
+      if (remaining === 0) {
+        setErrorMsg("Case failed. Revealing truth...");
+        setShowSolution(true);
+
+        setIsFailing(true);
+
+        await speakSolution(); // ⏳ WAIT for narration
+
+        setIsFailing(false);
+
+        // 🔄 reset AFTER narration
+        setGameState('menu');
+        setShowSolution(false);
+        setAttempts(2);
+        setSelections({});
       } else {
-        setErrorMsg(data.message || "Your theory doesn't hold water, Detective.");
+        setErrorMsg(`Wrong. ${remaining} attempt left.`);
       }
-    } catch (err) {
-      setErrorMsg("Verification failed.");
-    } finally {
-      setLoading(false);
     }
-  };
+  } finally {
+    setLoading(false);
+  }
+};
+
+  const onDragStart = (e, suspect) => {
+  e.dataTransfer.setData('suspect', JSON.stringify(suspect));
+};
+
+const onDrop = (e, weapon) => {
+  const suspect = JSON.parse(e.dataTransfer.getData('suspect'));
+  setSelections(prev => ({
+    ...prev,
+    [suspect.name]: weapon.name
+  }));
+};
+
+const allowDrop = (e) => e.preventDefault();
 
   if (loading && gameState === 'menu') {
     return (
@@ -170,7 +265,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0c] text-slate-300 font-serif">
+    <div className={`min-h-screen bg-[#0a0a0c] text-slate-300 font-serif ${isFailing ? 'fail-animate' : ''}`}>
       <nav className="p-6 border-b border-rose-900/20 bg-black flex justify-between items-center sticky top-0 z-50">
         <button onClick={() => setGameState('menu')} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:text-rose-500">
           <ArrowLeft size={16} /> Quit
@@ -190,6 +285,9 @@ export default function App() {
             <h3 className="text-rose-600 font-black text-[10px] uppercase mb-4 flex items-center gap-3 tracking-[0.4em]">
               <Fingerprint size={20} /> Detective's Case Notes
             </h3>
+            <button onClick={() => speakAllClues()} className="text-xs text-rose-500">
+              🔊 Read Clues
+            </button>
             <div className="mb-6 p-3 bg-rose-950/30 border-l border-rose-700">
               <p className="text-rose-400 text-[10px] font-bold uppercase mb-1">Lead Investigator</p>
               <p className="text-rose-300 text-xs italic">{DETECTIVE.name} - {DETECTIVE.title}</p>
@@ -199,7 +297,12 @@ export default function App() {
               {puzzle?.clues?.map((clue, i) => (
                 <div key={i} className="flex gap-3 border-b border-white/5 pb-4 last:border-0">
                   <ChevronRight size={14} className="text-rose-900 mt-1 flex-shrink-0" />
-                  <p className="text-xs text-zinc-300">{clue.text}</p>
+                  <p
+                    onClick={() => speak(clue)}
+                    className="text-xs text-zinc-300 cursor-pointer hover:text-rose-400"
+                  >
+                    {clue.text}
+                  </p>
                 </div>
               ))}
             </div>
@@ -212,6 +315,27 @@ export default function App() {
           >
             Submit Verdict
           </button>
+          <audio ref={failAudioRef} src="/fail.mp3" preload="auto" />
+          <audio ref={winAudioRef} src="/win.mp3" preload="auto" />
+          {showSolution && (
+          <div className="mt-6 p-6 border border-rose-800 bg-black">
+            <h3 className="text-rose-500 font-black mb-2">
+              Case Closed
+            </h3>
+
+            <p className="text-sm text-white">
+              Culprit: {puzzle.solution.Suspects.join(', ')}
+            </p>
+
+            <p className="text-sm text-white">
+              Weapon: {puzzle.solution.Weapons.join(', ')}
+            </p>
+
+            <p className="text-xs text-zinc-400 mt-4 italic">
+              {puzzle.solution.Justification}
+            </p>
+          </div>
+        )}
           
           {errorMsg && <p className="text-rose-600 text-[10px] uppercase font-black text-center">{errorMsg}</p>}
         </div>
@@ -220,44 +344,46 @@ export default function App() {
           {/* Suspects List */}
           <div className="space-y-4">
             <h4 className="text-[10px] text-zinc-600 uppercase font-black tracking-[0.4em] mb-6">The Suspects</h4>
-            {shuffledSuspects.map(name => (
-              <button
-                key={name}
-                onClick={() => setActiveSuspect(name === activeSuspect ? null : name)}
-                className={`w-full p-6 text-left border transition-all ${
-                  activeSuspect === name ? 'border-rose-600 bg-rose-950/20' : 'border-white/5 bg-zinc-900/30'
-                } ${selections[name] ? 'border-emerald-900/40' : ''}`}
+            {shuffledSuspects.map(s => (
+              <div
+                key={s.name}
+                draggable
+                onDragStart={(e) => onDragStart(e, s)}
+                className="p-5 border border-white/5 bg-zinc-900/40 cursor-grab"
               >
-                <span className="font-black text-xs uppercase tracking-widest">{name}</span>
-              </button>
+                <p className="font-black text-xs">{s.name}</p>
+                <p className="text-[10px] text-rose-400">{s.alias}</p>
+                <p className="text-[10px] text-zinc-400">{s.occupation}</p>
+                <p className="text-[10px] italic">{s.description}</p>
+                <p className="text-[10px] text-rose-600">Motive: {s.motive}</p>
+              </div>
             ))}
           </div>
 
           {/* Weapons List */}
           <div className="space-y-4">
             <h4 className="text-[10px] text-zinc-600 uppercase font-black tracking-[0.4em] mb-6">The Weapons</h4>
-            {shuffledWeapons.map(name => {
-              const matchedTo = Object.keys(selections).find(k => selections[k] === name);
-              return (
-                <button
-                  key={name}
-                  onClick={() => handleMatch(name)}
-                  disabled={!activeSuspect && !matchedTo}
-                  className={`w-full p-6 text-left border transition-all ${
-                    activeSuspect && selections[activeSuspect] === name 
-                      ? 'border-rose-600 bg-rose-950/20' 
-                      : matchedTo ? 'border-zinc-800 bg-black' : activeSuspect ? 'border-white/10' : 'opacity-20'
-                  }`}
-                >
-                  <span className="font-black text-xs uppercase tracking-widest">{name}</span>
-                  {matchedTo && (
-                    <span className="block text-[8px] text-rose-800 mt-2 font-black uppercase">
-                      Linked: {matchedTo}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
+            {shuffledWeapons.map(w => {
+                const matchedTo = Object.keys(selections).find(k => selections[k] === w.name);
+
+                return (
+                  <div
+                    key={w.name}
+                    onDrop={(e) => onDrop(e, w)}
+                    onDragOver={allowDrop}
+                    className="p-5 border border-white/10 bg-zinc-900/30"
+                  >
+                    <p className="font-black text-xs">{w.name}</p>
+                    <p className="text-[10px] text-zinc-400">{w.description}</p>
+
+                    {matchedTo && (
+                      <p className="text-[9px] text-emerald-500 mt-2">
+                        Assigned to: {matchedTo}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
           </div>
         </div>
       </main>
