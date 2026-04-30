@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Skull, Fingerprint, ChevronRight, ArrowLeft, Trophy, Loader } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api/puzzles';
@@ -43,10 +43,10 @@ export default function App() {
   const failAudioRef = useRef(null);
   const winAudioRef = useRef(null);
 
-  // Touch drag state — all refs so they never trigger re-renders
   const dragSuspectRef = useRef(null);
   const ghostRef = useRef(null);
 
+  // --- Speech Logic ---
   const speakAsync = (text) =>
     new Promise((resolve) => {
       const u = new SpeechSynthesisUtterance(text);
@@ -74,6 +74,138 @@ export default function App() {
     ]) await speakAsync(text);
   };
 
+  useEffect(() => {
+  if (gameState === 'menu') {
+    const greeting = "Hi Jency, Hope you are having a great day!";
+    const utter = new SpeechSynthesisUtterance(greeting);
+    utter.rate = 0.9;
+    window.speechSynthesis.speak(utter);
+  }
+}, [gameState]);
+
+  // --- Mobile Drag Fix: Global Listeners ---
+  useEffect(() => {
+    const handleGlobalTouchMove = (e) => {
+      if (!ghostRef.current) return;
+      // This is the CRITICAL fix: prevents the "Blank Screen" by stopping 
+      // the browser from trying to scroll/refresh while dragging
+      if (e.cancelable) e.preventDefault(); 
+      
+      const t = e.touches[0];
+      const g = ghostRef.current;
+      g.style.left = `${t.clientX - g._ox}px`;
+      g.style.top = `${t.clientY - g._oy}px`;
+    };
+
+    const handleGlobalTouchEnd = (e) => {
+      if (!ghostRef.current) return;
+      
+      const t = e.changedTouches[0];
+      const weaponName = getWeaponAtPoint(t.clientX, t.clientY);
+      
+      if (weaponName && dragSuspectRef.current) {
+        const suspectName = dragSuspectRef.current.name;
+
+        setSelections(prev => {
+          const newSelections = { ...prev };
+          
+          // Clear existing assignment for this suspect
+          delete newSelections[suspectName];
+
+          // Clear any other suspect assigned to this weapon
+          Object.keys(newSelections).forEach(key => {
+            if (newSelections[key] === weaponName) {
+              delete newSelections[key];
+            }
+          });
+
+          return { ...newSelections, [suspectName]: weaponName };
+        });
+      }
+
+      ghostRef.current.remove();
+      ghostRef.current = null;
+      dragSuspectRef.current = null;
+    };
+
+    window.addEventListener('touchmove', handleGlobalTouchMove, { passive: false });
+    window.addEventListener('touchend', handleGlobalTouchEnd);
+    
+    return () => {
+      window.removeEventListener('touchmove', handleGlobalTouchMove);
+      window.removeEventListener('touchend', handleGlobalTouchEnd);
+    };
+  }, []);
+
+  const getWeaponAtPoint = (x, y) => {
+    if (ghostRef.current) ghostRef.current.style.display = 'none';
+    const el = document.elementFromPoint(x, y);
+    if (ghostRef.current) ghostRef.current.style.display = 'block';
+    if (!el) return null;
+    let node = el;
+    while (node && node !== document.body) {
+      if (node.dataset?.weapon) return node.dataset.weapon;
+      node = node.parentElement;
+    }
+    return null;
+  };
+
+  const onTouchStart = (suspect) => (e) => {
+    dragSuspectRef.current = suspect;
+    const t = e.touches[0];
+    const sourceEl = e.currentTarget;
+    const rect = sourceEl.getBoundingClientRect();
+    const ghost = sourceEl.cloneNode(true);
+    
+    Object.assign(ghost.style, {
+      position: 'fixed',
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      opacity: '0.7',
+      pointerEvents: 'none',
+      zIndex: '9999',
+      margin: '0',
+      transition: 'none',
+      backgroundColor: '#18181b',
+      border: '1px solid #be123c'
+    });
+    
+    ghost._ox = t.clientX - rect.left;
+    ghost._oy = t.clientY - rect.top;
+    document.body.appendChild(ghost);
+    ghostRef.current = ghost;
+  };
+
+  // --- Desktop Handlers ---
+  const onDragStart = (e, suspect) => {
+    e.dataTransfer.setData('suspect', JSON.stringify(suspect));
+  };
+  const onDrop = (e, weapon) => {
+    const suspectData = e.dataTransfer.getData('suspect');
+    if (!suspectData) return;
+    const suspect = JSON.parse(suspectData);
+
+    setSelections(prev => {
+      const newSelections = { ...prev };
+      
+      // Step 1: Remove this suspect from any other weapon they were assigned to
+      delete newSelections[suspect.name];
+
+      // Step 2: Remove any other suspect that was assigned to THIS weapon
+      Object.keys(newSelections).forEach(key => {
+        if (newSelections[key] === weapon.name) {
+          delete newSelections[key];
+        }
+      });
+
+      // Step 3: Create the new link
+      return { ...newSelections, [suspect.name]: weapon.name };
+    });
+  };
+  const allowDrop = (e) => e.preventDefault();
+
+  // --- API / Game Logic ---
   const startInvestigation = async (diff) => {
     setLoading(true);
     setErrorMsg('');
@@ -85,7 +217,6 @@ export default function App() {
       });
       if (!response.ok) throw new Error('Could not reach the precinct database.');
       const data = await response.json();
-      if (!data || !data.categories) throw new Error('Forensic file is unreadable.');
       const suspects = data.categories.find(c => c.name === 'Suspects')?.items || [];
       const weapons  = data.categories.find(c => c.name === 'Weapons')?.items  || [];
       setPuzzle(data);
@@ -93,6 +224,8 @@ export default function App() {
       setShuffledWeapons(shuffleArray(weapons));
       setSelections({});
       setGameState('playing');
+      setAttempts(2);
+      setShowSolution(false);
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -114,20 +247,30 @@ export default function App() {
         body: JSON.stringify({ solution }),
       });
       const data = await res.json();
+
       if (data.isCorrect) {
-        failAudioRef.current?.pause();
-        failAudioRef.current.currentTime = 0;
         winAudioRef.current?.play().catch(() => {});
         setGameState('won');
       } else {
         const remaining = attempts - 1;
         setAttempts(remaining);
+
         if (remaining === 0) {
           setErrorMsg('Case failed. Revealing truth...');
           setShowSolution(true);
           setIsFailing(true);
+          failAudioRef.current?.play().catch(() => {});
+
+          // We await the speech so the user can read/hear everything
+          // before the UI disappears
           await speakSolution();
+
+          // Optional: Small delay after speaking so it doesn't feel abrupt
+          await new Promise(resolve => setTimeout(resolve, 2000));
+
+          // Reset everything and go back to menu
           setIsFailing(false);
+          setErrorMsg('');
           setGameState('menu');
           setShowSolution(false);
           setAttempts(2);
@@ -136,102 +279,14 @@ export default function App() {
           setErrorMsg(`Wrong. ${remaining} attempt left.`);
         }
       }
+    } catch (err) {
+      setErrorMsg("Forensic server error.");
     } finally {
       setLoading(false);
     }
   };
 
-  // Desktop drag handlers
-  const onDragStart = (e, suspect) => {
-    e.dataTransfer.setData('suspect', JSON.stringify(suspect));
-  };
-  const onDrop = (e, weapon) => {
-    const suspect = JSON.parse(e.dataTransfer.getData('suspect'));
-    setSelections(prev => ({ ...prev, [suspect.name]: weapon.name }));
-  };
-  const allowDrop = (e) => e.preventDefault();
-
-  // Ghost helpers — pure DOM, no state
-  const createGhost = (sourceEl, touchX, touchY) => {
-    const rect = sourceEl.getBoundingClientRect();
-    const ghost = sourceEl.cloneNode(true);
-    Object.assign(ghost.style, {
-      position: 'fixed',
-      left: `${rect.left}px`,
-      top: `${rect.top}px`,
-      width: `${rect.width}px`,
-      opacity: '0.7',
-      pointerEvents: 'none',
-      zIndex: '9999',
-      margin: '0',
-      transition: 'none',
-    });
-    ghost._ox = touchX - rect.left;
-    ghost._oy = touchY - rect.top;
-    document.body.appendChild(ghost);
-    ghostRef.current = ghost;
-  };
-
-  const moveGhost = (x, y) => {
-    const g = ghostRef.current;
-    if (!g) return;
-    g.style.left = `${x - g._ox}px`;
-    g.style.top  = `${y - g._oy}px`;
-  };
-
-  const removeGhost = () => {
-    ghostRef.current?.remove();
-    ghostRef.current = null;
-  };
-
-  const getWeaponAtPoint = (x, y) => {
-    if (ghostRef.current) ghostRef.current.style.visibility = 'hidden';
-    const el = document.elementFromPoint(x, y);
-    if (ghostRef.current) ghostRef.current.style.visibility = '';
-    if (!el) return null;
-    let node = el;
-    while (node && node !== document.body) {
-      if (node.dataset?.weapon) return node.dataset.weapon;
-      node = node.parentElement;
-    }
-    return null;
-  };
-
-  // useCallback gives stable references so addEventListener/removeEventListener pair correctly
-  const handleTouchMove = useCallback((e) => {
-    e.preventDefault(); // MUST be non-passive to work — see onTouchStart below
-    const t = e.touches[0];
-    moveGhost(t.clientX, t.clientY);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleTouchEnd = useCallback((e) => {
-    const t = e.changedTouches[0];
-    const weaponName = getWeaponAtPoint(t.clientX, t.clientY);
-    removeGhost();
-    // Clean up the imperatively added move listener
-    e.currentTarget.removeEventListener('touchmove', handleTouchMove);
-    if (weaponName && dragSuspectRef.current) {
-      setSelections(prev => ({ ...prev, [dragSuspectRef.current.name]: weaponName }));
-    }
-    dragSuspectRef.current = null;
-  }, [handleTouchMove]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const onTouchStart = (suspect) => (e) => {
-    dragSuspectRef.current = suspect;
-    const t = e.touches[0];
-    createGhost(e.currentTarget, t.clientX, t.clientY);
-
-    // KEY FIX: React registers synthetic touch listeners as passive by default on
-    // modern browsers, which means e.preventDefault() is silently ignored.
-    // Ignored preventDefault → browser scrolls/repaints the page during drag
-    // → blank white flash on iOS / Android.
-    // Solution: attach touchmove & touchend directly on the DOM node with
-    // { passive: false }, bypassing React's passive listener registration entirely.
-    e.currentTarget.addEventListener('touchmove', handleTouchMove, { passive: false });
-    e.currentTarget.addEventListener('touchend', handleTouchEnd, { once: true });
-  };
-
-  // Render
+  // --- Views ---
   if (loading && gameState === 'menu') {
     return (
       <div className="min-h-screen bg-black flex flex-col items-center justify-center text-rose-600 font-serif">
@@ -280,9 +335,6 @@ export default function App() {
           <Trophy size={100} className="text-rose-600 mx-auto mb-8" />
           <h2 className="text-6xl font-black text-white mb-4 uppercase italic">Case Solved</h2>
           <p className="text-rose-400 mb-6 text-sm italic">Another brilliant deduction by {DETECTIVE.name}</p>
-          <p className="text-zinc-400 mb-8 text-xs max-w-md mx-auto">
-            The finance expert's keen eye for detail and logical prowess have once again brought a killer to justice.
-          </p>
           <button
             onClick={() => setGameState('menu')}
             className="px-12 py-4 bg-rose-800 text-white font-black uppercase tracking-widest hover:bg-rose-700"
@@ -295,15 +347,12 @@ export default function App() {
   }
 
   return (
-    <div className={`min-h-screen bg-[#0a0a0c] text-slate-300 font-serif ${isFailing ? 'fail-animate' : ''}`}>
+    <div className={`min-h-screen bg-[#0a0a0c] text-slate-300 font-serif ${isFailing ? 'animate-pulse bg-rose-950/20' : ''}`}>
       <nav className="p-6 border-b border-rose-900/20 bg-black flex justify-between items-center sticky top-0 z-50">
-        <button
-          onClick={() => setGameState('menu')}
-          className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:text-rose-500"
-        >
+        <button onClick={() => setGameState('menu')} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:text-rose-500">
           <ArrowLeft size={16} /> Quit
         </button>
-        <div className="flex flex-col items-center">
+        <div className="flex flex-col items-center text-center">
           <span className="uppercase font-black tracking-widest text-white italic text-xs">{puzzle?.title}</span>
           <span className="text-rose-500 text-[9px] italic mt-1">Detective {DETECTIVE.name}</span>
         </div>
@@ -311,30 +360,18 @@ export default function App() {
       </nav>
 
       <main className="max-w-7xl mx-auto p-6 lg:p-12 grid lg:grid-cols-12 gap-12">
-        {/* Left panel */}
         <div className="lg:col-span-4 space-y-6">
           <div className="bg-zinc-900/40 p-8 border-l-2 border-rose-800">
             <h3 className="text-rose-600 font-black text-[10px] uppercase mb-4 flex items-center gap-3 tracking-[0.4em]">
-              <Fingerprint size={20} /> Detective's Case Notes
+              <Fingerprint size={20} /> Case Notes
             </h3>
-            <button onClick={speakAllClues} className="text-xs text-rose-500 mb-4 block">
-              🔊 Read Clues
-            </button>
-            <div className="mb-6 p-3 bg-rose-950/30 border-l border-rose-700">
-              <p className="text-rose-400 text-[10px] font-bold uppercase mb-1">Lead Investigator</p>
-              <p className="text-rose-300 text-xs italic">{DETECTIVE.name} — {DETECTIVE.title}</p>
-            </div>
+            <button onClick={speakAllClues} className="text-xs text-rose-500 mb-4 block hover:underline">🔊 Read Clues</button>
             <p className="text-zinc-400 italic mb-8 text-sm leading-relaxed">"{puzzle?.description}"</p>
             <div className="space-y-4">
               {puzzle?.clues?.map((clue, i) => (
                 <div key={i} className="flex gap-3 border-b border-white/5 pb-4 last:border-0">
                   <ChevronRight size={14} className="text-rose-900 mt-1 flex-shrink-0" />
-                  <p
-                    onClick={() => speak(clue)}
-                    className="text-xs text-zinc-300 cursor-pointer hover:text-rose-400"
-                  >
-                    {clue.text}
-                  </p>
+                  <p onClick={() => speak(clue)} className="text-xs text-zinc-300 cursor-pointer hover:text-rose-400">{clue.text}</p>
                 </div>
               ))}
             </div>
@@ -342,34 +379,29 @@ export default function App() {
 
           <button
             onClick={submitVerdict}
-            disabled={Object.keys(selections).length === 0}
+            disabled={Object.keys(selections).length === 0 || loading}
             className="w-full py-6 bg-rose-800 hover:bg-rose-700 disabled:bg-zinc-900 text-white font-black uppercase tracking-widest text-[10px]"
           >
-            Submit Verdict
+            {loading ? 'Processing...' : 'Submit Verdict'}
           </button>
 
           <audio ref={failAudioRef} src="/fail.mp3" preload="auto" />
           <audio ref={winAudioRef} src="/win.mp3" preload="auto" />
 
-          {showSolution && (
-            <div className="mt-6 p-6 border border-rose-800 bg-black">
-              <h3 className="text-rose-500 font-black mb-2">Case Closed</h3>
-              <p className="text-sm text-white">Culprit: {puzzle.solution.Suspects.join(', ')}</p>
-              <p className="text-sm text-white">Weapon: {puzzle.solution.Weapons.join(', ')}</p>
-              <p className="text-xs text-zinc-400 mt-4 italic">{puzzle.solution.Justification}</p>
+          {showSolution && puzzle && (
+            <div className="mt-6 p-6 border border-rose-800 bg-black animate-in fade-in slide-in-from-bottom-4 duration-1000">
+              <h3 className="text-rose-500 font-black mb-2 uppercase text-xs tracking-widest">Case Closed</h3>
+              <p className="text-sm text-white font-bold">Culprit: {puzzle.solution.Suspects.join(', ')}</p>
+              <p className="text-sm text-white font-bold">Weapon: {puzzle.solution.Weapons.join(', ')}</p>
+              <p className="text-xs text-zinc-400 mt-4 italic leading-relaxed">{puzzle.solution.Justification}</p>
             </div>
           )}
 
-          {errorMsg && (
-            <p className="text-rose-600 text-[10px] uppercase font-black text-center">{errorMsg}</p>
+          {errorMsg && !showSolution && (
+            <p className="text-rose-600 text-[10px] uppercase font-black text-center animate-bounce">{errorMsg}</p>
           )}
-
-          <p className="text-zinc-600 text-[10px] uppercase tracking-widest text-center lg:hidden">
-            Drag a suspect onto a weapon to link them
-          </p>
         </div>
 
-        {/* Right panel */}
         <div className="lg:col-span-8 grid md:grid-cols-2 gap-12">
           {/* Suspects */}
           <div className="space-y-4">
@@ -380,17 +412,12 @@ export default function App() {
                 draggable
                 onDragStart={(e) => onDragStart(e, s)}
                 onTouchStart={onTouchStart(s)}
-                // ⚠️ touchmove + touchend are NOT added here as React props.
-                // They're added imperatively inside onTouchStart with { passive: false }
-                // so that e.preventDefault() actually blocks scroll on iOS/Android.
                 className="p-5 border border-white/5 bg-zinc-900/40 cursor-grab active:cursor-grabbing select-none touch-none"
-                style={{ WebkitUserSelect: 'none', userSelect: 'none' }}
               >
                 <p className="font-black text-xs pointer-events-none">{s.name}</p>
-                <p className="text-[10px] text-rose-400 pointer-events-none">{s.alias}</p>
-                <p className="text-[10px] text-zinc-400 pointer-events-none">{s.occupation}</p>
-                <p className="text-[10px] italic pointer-events-none">{s.description}</p>
-                <p className="text-[10px] text-rose-600 pointer-events-none">Motive: {s.motive}</p>
+                <p className="text-[10px] text-rose-400 pointer-events-none mb-1">{s.alias}</p>
+                <p className="text-[10px] text-zinc-400 pointer-events-none line-clamp-2">{s.description}</p>
+                <p className="text-[10px] text-rose-600 mt-2 pointer-events-none">Motive: {s.motive}</p>
               </div>
             ))}
           </div>
@@ -406,15 +433,15 @@ export default function App() {
                   data-weapon={w.name}
                   onDrop={(e) => onDrop(e, w)}
                   onDragOver={allowDrop}
-                  className={`p-5 border bg-zinc-900/30 transition-colors ${
-                    matchedTo ? 'border-emerald-700/60 bg-emerald-950/20' : 'border-white/10'
+                  className={`p-5 border transition-all duration-300 ${
+                    matchedTo ? 'border-emerald-700/60 bg-emerald-950/20' : 'border-white/10 bg-zinc-900/30'
                   }`}
                 >
                   <p className="font-black text-xs pointer-events-none">{w.name}</p>
                   <p className="text-[10px] text-zinc-400 pointer-events-none">{w.description}</p>
                   {matchedTo && (
-                    <p className="text-[9px] text-emerald-500 mt-2 pointer-events-none">
-                      ✓ Assigned to: {matchedTo}
+                    <p className="text-[9px] text-emerald-500 mt-2 font-black uppercase tracking-widest">
+                      ✓ Linked to: {matchedTo}
                     </p>
                   )}
                 </div>
