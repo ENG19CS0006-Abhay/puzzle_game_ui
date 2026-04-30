@@ -9,7 +9,7 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
-    "build": "nest build",
+    "build": "vite build",
     "dev": "vite",
     "dev:build": "vite build",
     "test": "jest",
