@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { Skull, Fingerprint, ChevronRight, ArrowLeft, Trophy, Loader } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api/puzzles';
@@ -6,7 +6,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001
 const DETECTIVE = {
   name: 'Jency Infentica',
   title: 'Finance Expert Turned Detective',
-  bio: 'Once a renowned financial analyst, Jency Infentica left Wall Street to pursue her true passion: solving murder mysteries. Her sharp analytical mind and attention to detail make her the precinct\'s most brilliant detective.',
+  bio: "Once a renowned financial analyst, Jency Infentica left Wall Street to pursue her true passion: solving murder mysteries. Her sharp analytical mind and attention to detail make her the precinct's most brilliant detective.",
 };
 
 const shuffleArray = (array) => {
@@ -43,10 +43,9 @@ export default function App() {
   const failAudioRef = useRef(null);
   const winAudioRef = useRef(null);
 
-  // ── Touch drag state ──────────────────────────────────────────────────────
-  const dragSuspectRef = useRef(null);   // the suspect being dragged
-  const ghostRef = useRef(null);         // floating clone element
-  const weaponRefsMap = useRef({});      // { [weaponName]: domNode }
+  // Touch drag state — all refs so they never trigger re-renders
+  const dragSuspectRef = useRef(null);
+  const ghostRef = useRef(null);
 
   const speakAsync = (text) =>
     new Promise((resolve) => {
@@ -142,42 +141,42 @@ export default function App() {
     }
   };
 
-  // ── Desktop drag handlers ─────────────────────────────────────────────────
+  // Desktop drag handlers
   const onDragStart = (e, suspect) => {
     e.dataTransfer.setData('suspect', JSON.stringify(suspect));
   };
-
   const onDrop = (e, weapon) => {
     const suspect = JSON.parse(e.dataTransfer.getData('suspect'));
     setSelections(prev => ({ ...prev, [suspect.name]: weapon.name }));
   };
-
   const allowDrop = (e) => e.preventDefault();
 
-  // ── Mobile touch handlers ─────────────────────────────────────────────────
-  const createGhost = (el, x, y) => {
-    const rect = el.getBoundingClientRect();
-    const ghost = el.cloneNode(true);
-    ghost.style.position = 'fixed';
-    ghost.style.left = `${rect.left}px`;
-    ghost.style.top  = `${rect.top}px`;
-    ghost.style.width  = `${rect.width}px`;
-    ghost.style.opacity = '0.75';
-    ghost.style.pointerEvents = 'none';
-    ghost.style.zIndex = '9999';
-    ghost.style.transition = 'none';
-    ghost.style.margin = '0';
+  // Ghost helpers — pure DOM, no state
+  const createGhost = (sourceEl, touchX, touchY) => {
+    const rect = sourceEl.getBoundingClientRect();
+    const ghost = sourceEl.cloneNode(true);
+    Object.assign(ghost.style, {
+      position: 'fixed',
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      opacity: '0.7',
+      pointerEvents: 'none',
+      zIndex: '9999',
+      margin: '0',
+      transition: 'none',
+    });
+    ghost._ox = touchX - rect.left;
+    ghost._oy = touchY - rect.top;
     document.body.appendChild(ghost);
     ghostRef.current = ghost;
-    // offset so finger is centred on card
-    ghostRef.current._offsetX = x - rect.left;
-    ghostRef.current._offsetY = y - rect.top;
   };
 
   const moveGhost = (x, y) => {
-    if (!ghostRef.current) return;
-    ghostRef.current.style.left = `${x - ghostRef.current._offsetX}px`;
-    ghostRef.current.style.top  = `${y - ghostRef.current._offsetY}px`;
+    const g = ghostRef.current;
+    if (!g) return;
+    g.style.left = `${x - g._ox}px`;
+    g.style.top  = `${y - g._oy}px`;
   };
 
   const removeGhost = () => {
@@ -185,14 +184,11 @@ export default function App() {
     ghostRef.current = null;
   };
 
-  const getWeaponUnderPoint = (x, y) => {
-    // Temporarily hide ghost so elementFromPoint works
-    if (ghostRef.current) ghostRef.current.style.display = 'none';
+  const getWeaponAtPoint = (x, y) => {
+    if (ghostRef.current) ghostRef.current.style.visibility = 'hidden';
     const el = document.elementFromPoint(x, y);
-    if (ghostRef.current) ghostRef.current.style.display = '';
-
+    if (ghostRef.current) ghostRef.current.style.visibility = '';
     if (!el) return null;
-    // Walk up DOM to find a weapon card (data-weapon attribute)
     let node = el;
     while (node && node !== document.body) {
       if (node.dataset?.weapon) return node.dataset.weapon;
@@ -201,30 +197,41 @@ export default function App() {
     return null;
   };
 
-  const onTouchStart = (suspect) => (e) => {
-    dragSuspectRef.current = suspect;
-    const touch = e.touches[0];
-    createGhost(e.currentTarget, touch.clientX, touch.clientY);
-  };
+  // useCallback gives stable references so addEventListener/removeEventListener pair correctly
+  const handleTouchMove = useCallback((e) => {
+    e.preventDefault(); // MUST be non-passive to work — see onTouchStart below
+    const t = e.touches[0];
+    moveGhost(t.clientX, t.clientY);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const onTouchMove = (e) => {
-    e.preventDefault(); // prevents page scroll while dragging
-    const touch = e.touches[0];
-    moveGhost(touch.clientX, touch.clientY);
-  };
-
-  const onTouchEnd = (e) => {
-    const touch = e.changedTouches[0];
-    const weaponName = getWeaponUnderPoint(touch.clientX, touch.clientY);
+  const handleTouchEnd = useCallback((e) => {
+    const t = e.changedTouches[0];
+    const weaponName = getWeaponAtPoint(t.clientX, t.clientY);
     removeGhost();
+    // Clean up the imperatively added move listener
+    e.currentTarget.removeEventListener('touchmove', handleTouchMove);
     if (weaponName && dragSuspectRef.current) {
       setSelections(prev => ({ ...prev, [dragSuspectRef.current.name]: weaponName }));
     }
     dragSuspectRef.current = null;
+  }, [handleTouchMove]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onTouchStart = (suspect) => (e) => {
+    dragSuspectRef.current = suspect;
+    const t = e.touches[0];
+    createGhost(e.currentTarget, t.clientX, t.clientY);
+
+    // KEY FIX: React registers synthetic touch listeners as passive by default on
+    // modern browsers, which means e.preventDefault() is silently ignored.
+    // Ignored preventDefault → browser scrolls/repaints the page during drag
+    // → blank white flash on iOS / Android.
+    // Solution: attach touchmove & touchend directly on the DOM node with
+    // { passive: false }, bypassing React's passive listener registration entirely.
+    e.currentTarget.addEventListener('touchmove', handleTouchMove, { passive: false });
+    e.currentTarget.addEventListener('touchend', handleTouchEnd, { once: true });
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-
+  // Render
   if (loading && gameState === 'menu') {
     return (
       <div className="min-h-screen bg-black flex flex-col items-center justify-center text-rose-600 font-serif">
@@ -304,7 +311,7 @@ export default function App() {
       </nav>
 
       <main className="max-w-7xl mx-auto p-6 lg:p-12 grid lg:grid-cols-12 gap-12">
-        {/* ── Left panel: clues + submit ── */}
+        {/* Left panel */}
         <div className="lg:col-span-4 space-y-6">
           <div className="bg-zinc-900/40 p-8 border-l-2 border-rose-800">
             <h3 className="text-rose-600 font-black text-[10px] uppercase mb-4 flex items-center gap-3 tracking-[0.4em]">
@@ -357,13 +364,12 @@ export default function App() {
             <p className="text-rose-600 text-[10px] uppercase font-black text-center">{errorMsg}</p>
           )}
 
-          {/* Mobile hint */}
           <p className="text-zinc-600 text-[10px] uppercase tracking-widest text-center lg:hidden">
-            Drag a suspect card onto a weapon to link them
+            Drag a suspect onto a weapon to link them
           </p>
         </div>
 
-        {/* ── Right panel: suspects + weapons ── */}
+        {/* Right panel */}
         <div className="lg:col-span-8 grid md:grid-cols-2 gap-12">
           {/* Suspects */}
           <div className="space-y-4">
@@ -374,20 +380,22 @@ export default function App() {
                 draggable
                 onDragStart={(e) => onDragStart(e, s)}
                 onTouchStart={onTouchStart(s)}
-                onTouchMove={onTouchMove}
-                onTouchEnd={onTouchEnd}
+                // ⚠️ touchmove + touchend are NOT added here as React props.
+                // They're added imperatively inside onTouchStart with { passive: false }
+                // so that e.preventDefault() actually blocks scroll on iOS/Android.
                 className="p-5 border border-white/5 bg-zinc-900/40 cursor-grab active:cursor-grabbing select-none touch-none"
+                style={{ WebkitUserSelect: 'none', userSelect: 'none' }}
               >
-                <p className="font-black text-xs">{s.name}</p>
-                <p className="text-[10px] text-rose-400">{s.alias}</p>
-                <p className="text-[10px] text-zinc-400">{s.occupation}</p>
-                <p className="text-[10px] italic">{s.description}</p>
-                <p className="text-[10px] text-rose-600">Motive: {s.motive}</p>
+                <p className="font-black text-xs pointer-events-none">{s.name}</p>
+                <p className="text-[10px] text-rose-400 pointer-events-none">{s.alias}</p>
+                <p className="text-[10px] text-zinc-400 pointer-events-none">{s.occupation}</p>
+                <p className="text-[10px] italic pointer-events-none">{s.description}</p>
+                <p className="text-[10px] text-rose-600 pointer-events-none">Motive: {s.motive}</p>
               </div>
             ))}
           </div>
 
-          {/* Weapons — data-weapon attribute lets touch handler identify drop target */}
+          {/* Weapons */}
           <div className="space-y-4">
             <h4 className="text-[10px] text-zinc-600 uppercase font-black tracking-[0.4em] mb-6">The Weapons</h4>
             {shuffledWeapons.map(w => {
@@ -396,13 +404,10 @@ export default function App() {
                 <div
                   key={w.name}
                   data-weapon={w.name}
-                  ref={el => { weaponRefsMap.current[w.name] = el; }}
                   onDrop={(e) => onDrop(e, w)}
                   onDragOver={allowDrop}
                   className={`p-5 border bg-zinc-900/30 transition-colors ${
-                    matchedTo
-                      ? 'border-emerald-700/60 bg-emerald-950/20'
-                      : 'border-white/10'
+                    matchedTo ? 'border-emerald-700/60 bg-emerald-950/20' : 'border-white/10'
                   }`}
                 >
                   <p className="font-black text-xs pointer-events-none">{w.name}</p>
