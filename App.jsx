@@ -77,9 +77,18 @@ export default function App() {
   useEffect(() => {
   if (gameState === 'menu') {
     const greeting = "Hi Jency, Hope you are having a great day!";
-    const utter = new SpeechSynthesisUtterance(greeting);
-    utter.rate = 0.9;
-    window.speechSynthesis.speak(utter);
+    
+    // Try to speak the greeting (works better on localhost than HTTPS)
+    if (window.speechSynthesis) {
+      try {
+        const utter = new SpeechSynthesisUtterance(greeting);
+        utter.rate = 0.9;
+        utter.onerror = () => console.warn('Speech synthesis unavailable');
+        window.speechSynthesis.speak(utter);
+      } catch (err) {
+        console.warn('Speech synthesis error:', err);
+      }
+    }
   }
 }, [gameState]);
 
@@ -300,6 +309,9 @@ export default function App() {
     return (
       <div className="min-h-screen bg-[#050505] text-slate-200 flex flex-col items-center justify-center p-6 font-serif">
         <Skull className="text-rose-800 mb-8 animate-pulse" size={80} />
+        <div className="text-center mb-6 p-4 bg-rose-950/30 border border-rose-900/40 rounded">
+          <p className="text-rose-400 italic text-sm">Hi Jency, Hope you are having a great day!</p>
+        </div>
         <h1 className="text-6xl md:text-8xl font-black mb-4 italic tracking-tighter text-center uppercase">
           CRIME <span className="text-rose-700">SCENE</span> AI
         </h1>
