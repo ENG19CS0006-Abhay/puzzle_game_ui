@@ -4,9 +4,9 @@ import { Skull, Fingerprint, ChevronRight, ArrowLeft, Trophy, Loader } from 'luc
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api/puzzles';
 
 const DETECTIVE = {
-  name: 'Jency Infentica',
+  name: 'Jency Infantcia',
   title: 'Finance Expert Turned Detective',
-  bio: "Once a renowned financial analyst, Jency Infentica left Wall Street to pursue her true passion: solving murder mysteries. Her sharp analytical mind and attention to detail make her the precinct's most brilliant detective.",
+  bio: "Once a renowned financial analyst, Jency Infantcia left Wall Street to pursue her true passion: solving murder mysteries. Her sharp analytical mind and attention to detail make her the precinct's most brilliant detective.",
 };
 
 const shuffleArray = (array) => {
